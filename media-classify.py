@@ -17,11 +17,16 @@
 # Do not overwrite existing files in destination folder, but append a number to the file
 # Copy failed files (metadata could not be found) to destination under fail folder
 
+# 2016/11/28
+# Check if media is correclty classified
+# Needs exiftool (perl-image-exiftool)
+
 import os
 import sys
 import string
 import datetime
 import shutil
+import subprocess
 #from gi.repository import GExiv2
 import pyexiv2
 from os.path import join, normpath
@@ -31,6 +36,7 @@ class Classifier:
 		self.source = 'source'
 		self.destination = 'destination'
 		self.mode = 1
+		self.checker = False
 		self.numClassifed = 0
 		self.numFailed = 0
 		self.numIgnored = 0
@@ -42,22 +48,76 @@ class Classifier:
 			self.destination = argv[2]
 		if len(argv) >= 4:
 			self.mode = int(argv[3])
+		if len(argv) == 2:
+			self.checker = True
 
-	def getMetaData(self, filename):
+		if self.checker:
+			self.destination = ''
+
+	def getMetaDataDate(self, filename):
+		res = self.getMetaDataDatePyExiv2(filename)
+		if isinstance(res, datetime.datetime) and res.year != 1:
+			return res
+		return self.getMetaDataDateExiftool(filename)
+
+	def getMetaDataDateExiftool(self, filename):
 		try:
-			#metadata = GExiv2.Metadata(filename)
-			#print(metadata)
+			res = subprocess.check_output(["exiftool", "-CreateDate", "-DateTimeOriginal", filename])
+			pos = string.find(res, ': ')
+			if pos >= 0:
+				d = datetime.datetime.strptime(res[pos+2:pos+21], '%Y:%m:%d %H:%M:%S')
+				return d
+		except BaseException as err:
+			print('except: ' + str(err) + ' -> ' + filename)
+			pass
+		return datetime.datetime(1, 1, 1, 0, 0, 0)
+
+	def getMetaDataDatePyExiv2(self, filename):
+		try:
 			metadata = pyexiv2.ImageMetadata(filename)
 			metadata.read()
 			#print(metadata.exif_keys)
-			tag = metadata['Exif.Image.DateTime']
-			#print(tag.raw_value)
-			return tag.value
-			#tag = metadata['Exif.Photo.DateTimeOriginal']
-			#print(tag)
+			keys = ['Exif.Image.DateTime', 'Exif.Image.DateTimeOriginal', 'Exif.Photo.DateTimeOriginal', 'Exif.Photo.DateTimeDigitized']
+			for key in keys:
+				if key in metadata:
+					tag = metadata[key]
+					#print(tag.raw_value)
+					return tag.value
 		except:
 			pass
 		return datetime.datetime(1, 1, 1, 0, 0, 0)
+
+	def processFile(self, dir, file, t):
+		if self.checker:
+			self.processFileCheck(dir, file, t)
+		else:
+			self.processFileCopy(dir, file, t)
+
+	def processFileCopy(self, dir, file, t):
+		srcfile = join(dir, file)
+		if isinstance(t, datetime.datetime) and t.year != 1:
+			dest = self.genDestDirName(t)
+			self.copy(srcfile, dest, file)
+			print('copy: ' + srcfile + ' -> ' + join(dest, file))
+			self.numClassifed += 1
+		else:
+			faildest = join(self.destination, 'fail', dir[len(self.source):])
+			self.copy(srcfile, faildest, file)
+			print('fail: ' + srcfile + ' -> ' + join(faildest, file))
+			self.numFailed += 1
+
+	def processFileCheck(self, dir, file, t):
+		srcfile = join(dir, file)
+		if isinstance(t, datetime.datetime) and t.year != 1:
+			dest = self.genDestDirName(t)
+			if string.find(dir, dest) >= 0:
+				print('check ok: ' + srcfile + ' -> ' + dest)
+				self.numClassifed += 1
+			else:
+				print('check fail: ' + srcfile + ' -> ' + dest)
+				self.numFailed += 1
+		else:
+			print('no check (no metadata): ' + srcfile)
 
 	def genDestDirName(self, date):
 		dest = join(self.destination, str(date.year))
@@ -91,7 +151,8 @@ class Classifier:
 	def run(self):
 		print('Working directory: ' + os.getcwd())
 		print('Source: ' + self.source)
-		print('Destination: ' + self.destination)
+		if not self.checker:
+			print('Destination: ' + self.destination)
 
 		print('Proceed? ')
 		#res = input()
@@ -99,26 +160,14 @@ class Classifier:
 		if res != 'y':
 			sys.exit()
 
-		if not os.path.isdir(self.destination):
-			os.mkdir(self.destination)
-
 		for root, dirs, files in os.walk(self.source):
 			for file in files:
 				basefile, extension = os.path.splitext(file)
 				extension = extension.lower()
 				srcfile = join(root, file)
 				if extension in ['.jpg', '.jpeg', '.bmp', '.png', '.cr2', '.thm', '.mov', '.mp4', '.wmv', '.mod', '.mpg', '.avi', '.mts', '.mkv', ]:
-					t = self.getMetaData(srcfile)
-					if isinstance(t, datetime.datetime) and t.year != 1:
-						dest = self.genDestDirName(t)
-						self.copy(srcfile, dest, file)
-						print('copy: ' + srcfile + ' -> ' + join(dest, file))
-						self.numClassifed += 1
-					else:
-						faildest = join(self.destination, 'fail', root[len(self.source):])
-						self.copy(srcfile, faildest, file)
-						print('fail: ' + srcfile + ' -> ' + join(faildest, file))
-						self.numFailed += 1
+					t = self.getMetaDataDate(srcfile)
+					self.processFile(root, file, t)
 				else:
 					print('unknown: ' + srcfile)
 					self.numIgnored += 1
